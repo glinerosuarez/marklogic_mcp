@@ -1,0 +1,26 @@
+# Copy to config.yaml and fill in, or export the referenced environment variables.
+# config.py interpolates ${VAR} from the environment and fails loudly if a referenced
+# variable is unset — prefer that over pasting real passwords into this file.
+#
+# config.yaml is gitignored. Keep it that way.
+
+default_server: dev
+
+servers:
+  dev:
+    host: marklogic.dev.example.internal
+    port: 8000
+    user: ${ML_DEV_USER}
+    password: ${ML_DEV_PASSWORD}
+    use_https: true
+    ssl_ca_bundle: "/path/to/pca-root-ca.pem"   # or `true` to use system CAs
+    default_permissions: "rest-reader:read"
+
+  prod:
+    host: marklogic.prod.example.internal
+    port: 8000
+    user: ${ML_PROD_USER}
+    password: ${ML_PROD_PASSWORD}
+    use_https: true
+    ssl_ca_bundle: "/path/to/pca-root-ca.pem"
+    default_permissions: "rest-reader:read"

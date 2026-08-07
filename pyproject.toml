@@ -1,0 +1,13 @@
+[project]
+name = "ml-mcp-server"
+version = "0.1.0"
+description = "MCP server for AI agents to read, write, search, and query MarkLogic databases"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.9.0",
+    "requests>=2.32.0",
+    "pyyaml>=6.0",
+]
+
+[tool.uv]
+package = false

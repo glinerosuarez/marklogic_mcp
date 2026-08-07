@@ -1,0 +1,29 @@
+# Real configuration — CONTAINS CREDENTIALS, never commit.
+# Copy the .example files and fill them in (or export the referenced env vars).
+config.yaml
+config-local.yaml
+*.local.yaml
+
+# Environment files holding real credentials (.env.example is the template)
+.env
+.env.*
+!.env.example
+
+# Local backups taken before edits
+*.bak
+*.bak-*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
