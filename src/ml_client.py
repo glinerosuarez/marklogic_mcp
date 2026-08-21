@@ -50,6 +50,95 @@ _CODE_RE = re.compile(
 )
 
 
+_PROLOG_KEYWORD = re.compile(
+    r"(?:xquery\s+version|module\s+namespace|declare|import)\b", re.IGNORECASE
+)
+
+
+def _skip_ignorable(s: str, i: int) -> int:
+    """Advance past whitespace and `(: nested :)` comments."""
+    n = len(s)
+    while i < n:
+        if s[i].isspace():
+            i += 1
+        elif s.startswith("(:", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if s.startswith("(:", i):
+                    depth, i = depth + 1, i + 2
+                elif s.startswith(":)", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+        else:
+            return i
+    return i
+
+
+def _end_of_declaration(s: str, i: int) -> int:
+    """Index just past the `;` terminating the declaration starting at `i`, else -1.
+
+    Skips `;` inside string literals, comments, and braces, so a
+    `declare function local:f() { ... };` body cannot end the declaration early.
+    """
+    n, depth = len(s), 0
+    while i < n:
+        ch = s[i]
+        if ch in "\"'":
+            quote, i = ch, i + 1
+            while i < n:
+                if s[i] == quote:
+                    if i + 1 < n and s[i + 1] == quote:  # doubled = escaped
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        elif s.startswith("(:", i):
+            i = _skip_ignorable(s, i)
+        elif ch == "{":
+            depth, i = depth + 1, i + 1
+        elif ch == "}":
+            depth, i = depth - 1, i + 1
+        elif ch == ";" and depth == 0:
+            return i + 1
+        else:
+            i += 1
+    return -1
+
+
+def _split_prolog(xquery: str) -> tuple[str, str]:
+    """Split leading prolog declarations from the query body.
+
+    Returns `("", xquery)` when there is no prolog, so the overwhelmingly common
+    prolog-free call is byte-for-byte unchanged.
+
+    Why this exists: `_wrap_eval` inlines the caller's query into a function body,
+    and XQuery **prolog declarations are illegal in a function body**. Without
+    hoisting, every query carrying `declare namespace` / `declare variable` /
+    `declare function` / `import module` failed with a bare
+    `XDMP-UNEXPECTED ... expecting Comma_ or Rbrace_` — the `Rbrace_` being the
+    injected `}`. That covered a broad, common class of MarkLogic queries and was
+    misdiagnosed for weeks as an unfixable "transport limitation" because the old
+    error handling discarded MarkLogic's message.
+
+    Known limitation: a top-level `;` inside a direct element constructor in a
+    declaration default (e.g. `declare variable $x := <a>;</a>;`) would split early.
+    Strings, comments and braces are handled; bare element content is not.
+    """
+    end = 0
+    i = _skip_ignorable(xquery, 0)
+    while _PROLOG_KEYWORD.match(xquery, i):
+        j = _end_of_declaration(xquery, i)
+        if j == -1:
+            break
+        end = j
+        i = _skip_ignorable(xquery, j)
+    if not end:
+        return "", xquery
+    return xquery[:end], xquery[end:]
+
+
 def _xq_str(s: str) -> str:
     """Escape a string for use inside an XQuery double-quoted string literal.
 
@@ -247,8 +336,12 @@ class MarkLogicClient:
             opts.append("<update>false</update>")
         if not opts:
             return xquery
+        # A prolog cannot live inside the function body below — hoist it above the
+        # invoke, where it is legal and still in scope for the body. See _split_prolog.
+        prolog, body = _split_prolog(xquery)
+        prefix = f"{prolog}\n" if prolog else ""
         return (
-            f'xdmp:invoke-function(function() {{ {xquery} }}, '
+            f'{prefix}xdmp:invoke-function(function() {{ {body} }}, '
             f'<options xmlns="xdmp:eval">{"".join(opts)}</options>)'
         )
 

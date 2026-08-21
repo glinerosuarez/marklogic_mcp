@@ -381,7 +381,7 @@ def _():
     import server as _srv
     for bad in (["badformat"], ["rest-reader:"], [":read"]):
         try:
-            _srv.write_document("/perm-check.xml", "<a/>", DB, "xml", [], bad, "local")
+            _srv.write_document("/perm-check.xml", "<a/>", DB, "xml", [], bad, server="local")
         except ValueError as e:
             msg = str(e)
             assert "role:capability" in msg or "non-empty" in msg, f"unhelpful: {msg}"
@@ -396,7 +396,7 @@ def _():
     import server as _srv
     u = "/perm-ok-DELETE-ME.xml"
     _hard_delete(u)
-    _srv.write_document(u, "<a/>", DB, "xml", [], ["rest-reader:read"], "local")
+    _srv.write_document(u, "<a/>", DB, "xml", [], ["rest-reader:read"], server="local")
     assert _exists(u), "valid permissions were rejected"
     _hard_delete(u)
 
@@ -621,6 +621,64 @@ def _():
     assert {"server", "database", "uri"} <= params, f"resource params are {params}"
 
 
+# ------------------------------------------ required `server` parameter (B)
+# `server` used to default to DEFAULT_SERVER, so a call meant for prod that omitted it
+# silently answered from dev — a wrong answer indistinguishable from a right one. It is
+# now required on every tool, enforced by the signature rather than by documentation.
+
+@check("B: every tool declares `server` as required in its MCP schema")
+def _():
+    import asyncio
+    import server as _srv
+    tools = asyncio.run(_srv.mcp.list_tools())
+    assert tools, "no tools registered"
+    missing = [
+        t.name for t in tools
+        if "server" not in (t.inputSchema.get("required") or [])
+    ]
+    assert not missing, f"tools not requiring `server`: {missing}"
+    # `database` too, on every tool that takes one
+    lax = [
+        t.name for t in tools
+        if "database" in (t.inputSchema.get("properties") or {})
+        and "database" not in (t.inputSchema.get("required") or [])
+    ]
+    assert not lax, f"tools not requiring `database`: {lax}"
+
+
+@check("B: omitting `server` is a TypeError, not a silent default")
+def _():
+    import server as _srv
+    try:
+        _srv.eval_xquery_readonly("1", DB)  # no server=
+        raise AssertionError("call without `server` was accepted")
+    except TypeError as e:
+        assert "server" in str(e), f"unexpected TypeError: {e}"
+
+
+@check("B: an empty `server` is refused with an actionable message")
+def _():
+    import server as _srv
+    try:
+        _srv.eval_xquery_readonly("1", DB, server="")
+        raise AssertionError("empty `server` was accepted")
+    except ValueError as e:
+        msg = str(e)
+        assert "required" in msg, msg
+        assert "local" in msg, f"message should list available servers: {msg}"
+
+
+@check("B: `server` must be passed by keyword, not positionally")
+def _():
+    import server as _srv
+    try:
+        _srv.eval_xquery_readonly("1", DB, "local")  # positional
+        raise AssertionError("positional `server` was accepted")
+    except TypeError:
+        pass
+    assert _srv.eval_xquery_readonly("1", DB, server="local") == ["1"]
+
+
 # --------------------------------------------- mutable default arguments (S5)
 
 @check("S5: write_document has no mutable default arguments")
@@ -643,6 +701,120 @@ def _():
     _srv.write_document(u, "<a/>", DB, "xml", server="local")
     assert _exists(u), "write with defaulted collections/permissions did not land"
     _hard_delete(u)
+
+
+# ------------------------------------------------------- XQuery prolog hoisting
+# _wrap_eval inlines the caller's query into a function body, where XQuery prolog
+# declarations are ILLEGAL. Every query carrying `declare namespace|variable|function`
+# or `import module` therefore failed with a bare XDMP-UNEXPECTED (...expecting
+# Rbrace_ — the injected `}`). Only `xquery version` was special-cased. The fix
+# hoists the whole prolog above the invoke. The enforcement test at the end of this
+# block is the important one: hoisting must not become a way to escape readonly.
+
+@check("prolog: declare namespace is honoured")
+def _():
+    got = c.eval_xquery_readonly(
+        'declare namespace p = "http://cas.org/protein"; fn:count(fn:doc())', DB)
+    assert len(got) == 1 and got[0].isdigit(), f"expected one count, got {got!r}"
+
+
+@check("prolog: declare variable is honoured")
+def _():
+    got = c.eval_xquery_readonly('declare variable $x as xs:string := "hello"; $x', DB)
+    assert got == ["hello"], f"expected ['hello'], got {got!r}"
+
+
+@check("prolog: declare function is honoured")
+def _():
+    got = c.eval_xquery_readonly('declare function local:double($n) { $n * 2 }; local:double(21)', DB)
+    assert got == ["42"], f"expected ['42'], got {got!r}"
+
+
+@check("prolog: a `;` inside a declare function body does not split the prolog")
+def _():
+    q = 'declare function local:f() { fn:string-join(("a", "b"), ";") }; local:f()'
+    got = c.eval_xquery_readonly(q, DB)
+    assert got == ["a;b"], f"expected ['a;b'], got {got!r}"
+
+
+@check("prolog: version + several declarations combined")
+def _():
+    q = ('xquery version "1.0-ml"; '
+         'declare namespace p = "u"; '
+         'declare variable $n := 20; '
+         '$n + 22')
+    got = c.eval_xquery_readonly(q, DB)
+    assert got == ["42"], f"expected ['42'], got {got!r}"
+
+
+@check("prolog: comments around declarations are tolerated")
+def _():
+    q = '(: leading :) declare variable $x := 5; (: mid :) $x * 2'
+    got = c.eval_xquery_readonly(q, DB)
+    assert got == ["10"], f"expected ['10'], got {got!r}"
+
+
+@check("prolog: prolog-free queries are passed through byte-identically")
+def _():
+    sys.path.insert(0, str(REPO / "src"))
+    from ml_client import _split_prolog
+    for q in ('1 + 1', 'fn:count(fn:doc())', '("a", "b")', 'xdmp:database-name(xdmp:database())'):
+        prolog, body = _split_prolog(q)
+        assert prolog == "" and body == q, f"{q!r} was altered: {prolog!r} / {body!r}"
+
+
+@check("prolog: write path also honours a prolog")
+def _():
+    u = "/prolog-write-check.xml"
+    _hard_delete(u)
+    c.eval_xquery(
+        f'declare variable $u as xs:string := "{u}"; '
+        f'xdmp:document-insert($u, <a>via prolog</a>)', DB)
+    assert _exists(u), "write path dropped a prolog-bearing insert"
+    _hard_delete(u)
+
+
+@check("prolog: BLOCKS a write hidden behind a prolog (hoisting is not an escape)")
+def _():
+    _reseed()
+    _assert_blocked(
+        f'declare variable $u as xs:string := "{SEEDED}"; xdmp:document-delete($u)',
+        SEEDED, "prolog-wrapped delete", should_exist_after=True)
+
+
+# -------------------------------------------------- eval_xquery_to_file newlines
+
+@check("to_file: every line is newline-terminated so wc -l matches item count")
+def _():
+    import server as _srv
+    out = "/tmp/_sr_to_file_nl.txt"
+    _srv.eval_xquery_to_file('("a", "b", "c")', DB, out, readonly=True, server="local")
+    text = Path(out).read_text(encoding="utf-8")
+    assert text == "a\nb\nc\n", f"expected 'a\\nb\\nc\\n', got {text!r}"
+    assert text.count("\n") == 3, f"expected 3 newlines for 3 items, got {text.count(chr(10))}"
+    Path(out).unlink()
+
+
+@check("to_file: concatenating two outputs does not merge across the boundary")
+def _():
+    import server as _srv
+    a, b = "/tmp/_sr_cat_a.txt", "/tmp/_sr_cat_b.txt"
+    _srv.eval_xquery_to_file('("a1", "a2")', DB, a, readonly=True, server="local")
+    _srv.eval_xquery_to_file('("b1", "b2")', DB, b, readonly=True, server="local")
+    joined = Path(a).read_text(encoding="utf-8") + Path(b).read_text(encoding="utf-8")
+    lines = [ln for ln in joined.split("\n") if ln]
+    assert lines == ["a1", "a2", "b1", "b2"], f"boundary corrupted: {lines!r}"
+    assert "a2b1" not in joined, "last line of file A merged into first line of file B"
+    Path(a).unlink(); Path(b).unlink()
+
+
+@check("to_file: empty result set writes an empty file, not a lone newline")
+def _():
+    import server as _srv
+    out = "/tmp/_sr_to_file_empty.txt"
+    _srv.eval_xquery_to_file('()', DB, out, readonly=True, server="local")
+    assert Path(out).read_text(encoding="utf-8") == "", "empty result should write nothing"
+    Path(out).unlink()
 
 
 # ---------------------------------------------------------------------- teardown

@@ -11,8 +11,10 @@ mcp = FastMCP(
     "ml-mcp-server",
     instructions=(
         "Read, write, search, and query MarkLogic databases. "
-        f"Available servers: {', '.join(CLIENTS)}. Default: {DEFAULT_SERVER}. "
-        "Pass server= and database= on each tool call to target a specific environment and database. "
+        f"Available servers: {', '.join(CLIENTS)}. "
+        "`server` and `database` are REQUIRED on every tool call — neither is defaulted, "
+        "because silently answering from the wrong environment or database yields a "
+        "plausible result indistinguishable from a correct one. Name both every time. "
         "Failures are raised as tool errors, never returned as a normal result: a call "
         "that comes back without an error succeeded. Error text carries the MarkLogic "
         "message code (e.g. XDMP-NOSUCHDB, RESTAPI-NODOCUMENT, XDMP-UPDATEFUNCTIONFROMQUERY) "
@@ -26,20 +28,33 @@ _FMT_MAP = {"json": "application/json", "xml": "application/xml", "text": "text/
 
 
 def _client(server: str):
-    name = server or DEFAULT_SERVER
-    if name not in CLIENTS:
-        raise ValueError(f"Unknown server '{name}'. Available: {list(CLIENTS)}")
-    return CLIENTS[name]
+    """Resolve a server name to a client.
+
+    `server` is a REQUIRED parameter on every tool and is deliberately not defaulted
+    here. It used to fall back to DEFAULT_SERVER, which meant a query intended for prod
+    that omitted `server` silently answered from dev — a wrong answer that looks exactly
+    like a right one. Refuse instead of guessing.
+    """
+    if not server:
+        raise ValueError(
+            f"`server` is required — name the environment explicitly. Available: {list(CLIENTS)}. "
+            "It is not defaulted on purpose: silently answering from the wrong environment "
+            "produces a plausible result that cannot be distinguished from a correct one."
+        )
+    if server not in CLIENTS:
+        raise ValueError(f"Unknown server '{server}'. Available: {list(CLIENTS)}")
+    return CLIENTS[server]
 
 
 @mcp.tool()
-def read_document(uri: str, database: str, server: str = "") -> str:
+def read_document(uri: str, database: str, *, server: str) -> str:
     """Read a MarkLogic document by URI. Returns raw document content.
 
     Args:
         uri: Document URI, e.g. /protein/P12345.xml or /config/settings.json
         database: Database name, e.g. rnatherapeutic or Documents.
-        server: Server name (local/dev/prod). Defaults to configured default.
+        server: Server name (local/dev/prod). REQUIRED — never defaulted, so an
+                omission fails loudly instead of silently answering from another environment.
     """
     return _client(server).read_document(uri, database)
 
@@ -52,7 +67,8 @@ def write_document(
     format: str = "json",
     collections: list[str] | None = None,
     permissions: list[str] | None = None,
-    server: str = "",
+    *,
+    server: str,
 ) -> str:
     """Write a document to MarkLogic. Returns "OK" on success.
 
@@ -65,7 +81,7 @@ def write_document(
         permissions: ["role:capability"] pairs, e.g. ["rest-reader:read", "rest-writer:update"].
                      Defaults to server's default_permissions if omitted.
                      WARNING: omitting permissions makes the document admin-only visible.
-        server: Server name (local/dev/prod).
+        server: Server name (local/dev/prod). REQUIRED — never defaulted.
     """
     content_type = _FMT_MAP.get(format, "application/json")
     parsed_perms = None
@@ -100,7 +116,8 @@ def search_documents(
     limit: int = 10,
     offset: int = 1,
     snippets: bool = False,
-    server: str = "",
+    *,
+    server: str,
 ) -> dict:
     """Search MarkLogic documents. Returns {"n": total, "uris": [...]}.
 
@@ -111,13 +128,13 @@ def search_documents(
         limit: Max results (1–500). Default 10.
         offset: Starting position for pagination. Default 1.
         snippets: Include text snippets alongside URIs.
-        server: Server name (local/dev/prod).
+        server: Server name (local/dev/prod). REQUIRED — never defaulted.
     """
     return _client(server).search_documents(query, collection, limit, offset, snippets, database)
 
 
 @mcp.tool()
-def eval_xquery_readonly(xquery: str, database: str, server: str = "") -> list[str]:
+def eval_xquery_readonly(xquery: str, database: str, *, server: str) -> list[str]:
     """Execute read-only XQuery against MarkLogic. Enforces query transaction mode — any write attempt raises an error.
 
     Use this for all read/inspect queries. Use eval_xquery only when you need to write.
@@ -128,13 +145,13 @@ def eval_xquery_readonly(xquery: str, database: str, server: str = "") -> list[s
                 'fn:collection("notes")/note/title/fn:string()'
                 'for $d in fn:doc() where $d//status = "active" return base-uri($d)'
         database: Database name, e.g. rnatherapeutic or Documents.
-        server: Server name (local/dev/prod).
+        server: Server name (local/dev/prod). REQUIRED — never defaulted.
     """
     return _client(server).eval_xquery_readonly(xquery, database)
 
 
 @mcp.tool()
-def eval_xquery(xquery: str, database: str, server: str = "") -> list[str]:
+def eval_xquery(xquery: str, database: str, *, server: str) -> list[str]:
     """Execute XQuery against MarkLogic. Returns one string per result item.
 
     Args:
@@ -143,7 +160,7 @@ def eval_xquery(xquery: str, database: str, server: str = "") -> list[str]:
                 'fn:collection("notes")/note/title/fn:string()'
                 'for $d in fn:doc() where $d//status = "active" return base-uri($d)'
         database: Database name, e.g. rnatherapeutic or Documents.
-        server: Server name (local/dev/prod).
+        server: Server name (local/dev/prod). REQUIRED — never defaulted.
     """
     return _client(server).eval_xquery(xquery, database)
 
@@ -154,13 +171,16 @@ def eval_xquery_to_file(
     database: str,
     file_path: str,
     readonly: bool = False,
-    server: str = "",
+    *,
+    server: str,
 ) -> str:
     """Execute XQuery against MarkLogic and save the result to a local file.
 
-    Joins the result items (one per XQuery result, MIME boundaries already stripped)
-    with newlines and writes the plain text to file_path. Useful when a result set
-    is too large or unwieldy to return directly through MCP.
+    Writes one result item per line, each newline-TERMINATED (including the last),
+    so `wc -l` matches the item count and concatenating two output files cannot
+    merge a line across the boundary. Useful when a result set is too large or
+    unwieldy to return directly through MCP: only a one-line summary comes back,
+    while the full set stays on disk for grep/wc or a reader subagent.
 
     Args:
         xquery: XQuery expression, e.g.:
@@ -170,7 +190,8 @@ def eval_xquery_to_file(
         database: Database name, e.g. rnatherapeutic or Documents.
         file_path: Local filesystem path to write the output to, e.g. /tmp/results.txt.
         readonly: If true, enforce query transaction mode — any write attempt raises an error.
-        server: Server name (local/dev/prod). Defaults to configured default.
+        server: Server name (local/dev/prod). REQUIRED — never defaulted, so an
+                omission fails loudly instead of silently answering from another environment.
     """
     client = _client(server)
     results = (
@@ -178,7 +199,10 @@ def eval_xquery_to_file(
         if readonly
         else client.eval_xquery(xquery, database)
     )
-    content = "\n".join(results)
+    # Newline-TERMINATED, not newline-separated: an unterminated final line makes
+    # `wc -l` under-report by one and makes `cat a.txt b.txt` merge a's last line
+    # into b's first. That silently corrupted 13 of 2,816 accessions on LSCON-6035.
+    content = "".join(f"{r}\n" for r in results)
     Path(file_path).write_text(content, encoding="utf-8")
     return f"OK: wrote {len(results)} result item(s) ({len(content)} chars) to {file_path}"
 
@@ -190,7 +214,8 @@ def validate_documents(
     collection: str = "",
     limit: int = 100,
     mode: str = "strict",
-    server: str = "",
+    *,
+    server: str,
 ) -> dict:
     """Validate stored documents against their in-scope schema (XSD). Returns per-URI errors.
 
@@ -222,7 +247,7 @@ def validate_documents(
               use it to detect ordering and missing-child defects. "lax" validates
               only what it can find a declaration for, which is the right choice when
               part of the corpus is deliberately schema-less.
-        server: Server name (local/dev/prod).
+        server: Server name (local/dev/prod). REQUIRED — never defaulted.
 
     Returns {"checked": n, "invalid": n, "missing": n, "mode": str,
              "schema_in_scope": bool, "truncated": bool,
