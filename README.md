@@ -12,7 +12,7 @@ across configured environments.
 | `search_documents` | Search by full-text query and/or collection; returns total + URIs. |
 | `eval_xquery` | Run XQuery. Updates permitted. |
 | `eval_xquery_readonly` | Run XQuery with updates **rejected**. Use for all read/inspect work. |
-| `eval_xquery_to_file` | Run XQuery and write the results to a local file. |
+| `eval_xquery_to_file` | Run XQuery with updates **rejected** and write the results to a local file. Always read-only — there is no write mode. |
 | `validate_documents` | Validate stored documents against their in-scope XSD. |
 
 `database` is required on every tool. `server` selects the environment and defaults to

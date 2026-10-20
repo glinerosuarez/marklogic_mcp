@@ -788,7 +788,7 @@ def _():
 def _():
     import server as _srv
     out = "/tmp/_sr_to_file_nl.txt"
-    _srv.eval_xquery_to_file('("a", "b", "c")', DB, out, readonly=True, server="local")
+    _srv.eval_xquery_to_file('("a", "b", "c")', DB, out, server="local")
     text = Path(out).read_text(encoding="utf-8")
     assert text == "a\nb\nc\n", f"expected 'a\\nb\\nc\\n', got {text!r}"
     assert text.count("\n") == 3, f"expected 3 newlines for 3 items, got {text.count(chr(10))}"
@@ -799,8 +799,8 @@ def _():
 def _():
     import server as _srv
     a, b = "/tmp/_sr_cat_a.txt", "/tmp/_sr_cat_b.txt"
-    _srv.eval_xquery_to_file('("a1", "a2")', DB, a, readonly=True, server="local")
-    _srv.eval_xquery_to_file('("b1", "b2")', DB, b, readonly=True, server="local")
+    _srv.eval_xquery_to_file('("a1", "a2")', DB, a, server="local")
+    _srv.eval_xquery_to_file('("b1", "b2")', DB, b, server="local")
     joined = Path(a).read_text(encoding="utf-8") + Path(b).read_text(encoding="utf-8")
     lines = [ln for ln in joined.split("\n") if ln]
     assert lines == ["a1", "a2", "b1", "b2"], f"boundary corrupted: {lines!r}"
@@ -812,9 +812,31 @@ def _():
 def _():
     import server as _srv
     out = "/tmp/_sr_to_file_empty.txt"
-    _srv.eval_xquery_to_file('()', DB, out, readonly=True, server="local")
+    _srv.eval_xquery_to_file('()', DB, out, server="local")
     assert Path(out).read_text(encoding="utf-8") == "", "empty result should write nothing"
     Path(out).unlink()
+
+
+@check("to_file: always read-only — BLOCKS xdmp:document-insert and leaves no file")
+def _():
+    import server as _srv
+    out = "/tmp/_sr_to_file_write.txt"
+    Path(out).unlink(missing_ok=True)
+    try:
+        _srv.eval_xquery_to_file(f'xdmp:document-insert("{PROBE}", <p/>)', DB, out, server="local")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("to_file accepted a write query")
+    assert not _exists(PROBE), "to_file MUTATED the database"
+    assert not Path(out).exists(), "to_file wrote an output file for a rejected query"
+
+
+@check("to_file: has no readonly parameter to switch enforcement off")
+def _():
+    import inspect, server as _srv
+    fn = getattr(_srv.eval_xquery_to_file, "fn", _srv.eval_xquery_to_file)
+    assert "readonly" not in inspect.signature(fn).parameters, "readonly param still present"
 
 
 # ---------------------------------------------------------------------- teardown

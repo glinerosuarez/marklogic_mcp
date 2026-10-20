@@ -170,11 +170,14 @@ def eval_xquery_to_file(
     xquery: str,
     database: str,
     file_path: str,
-    readonly: bool = False,
     *,
     server: str,
 ) -> str:
-    """Execute XQuery against MarkLogic and save the result to a local file.
+    """Execute read-only XQuery against MarkLogic and save the result to a local file.
+
+    Always runs in query transaction mode — any write attempt raises an error. There is
+    deliberately no write mode: reading a large result to disk never needs one, and a
+    read-only tool is what makes this safe to pre-authorize. Use eval_xquery to write.
 
     Writes one result item per line, each newline-TERMINATED (including the last),
     so `wc -l` matches the item count and concatenating two output files cannot
@@ -189,16 +192,11 @@ def eval_xquery_to_file(
                 'for $d in fn:doc() where $d//status = "active" return base-uri($d)'
         database: Database name, e.g. rnatherapeutic or Documents.
         file_path: Local filesystem path to write the output to, e.g. /tmp/results.txt.
-        readonly: If true, enforce query transaction mode — any write attempt raises an error.
         server: Server name (local/dev/prod). REQUIRED — never defaulted, so an
                 omission fails loudly instead of silently answering from another environment.
     """
     client = _client(server)
-    results = (
-        client.eval_xquery_readonly(xquery, database)
-        if readonly
-        else client.eval_xquery(xquery, database)
-    )
+    results = client.eval_xquery_readonly(xquery, database)
     # Newline-TERMINATED, not newline-separated: an unterminated final line makes
     # `wc -l` under-report by one and makes `cat a.txt b.txt` merge a's last line
     # into b's first. That silently corrupted 13 of 2,816 accessions on LSCON-6035.
