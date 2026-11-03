@@ -139,6 +139,62 @@ def _split_prolog(xquery: str) -> tuple[str, str]:
     return xquery[:end], xquery[end:]
 
 
+_USING_SCHEMA_RE = re.compile(r'using schema "([^"]*)"')
+
+
+def _schemas_used(findings: list[dict]) -> list[str]:
+    """Distinct schema locations MarkLogic named in validation error details.
+
+    `xdmp:validate` error text ends `... using schema "/xsd/base/<domain>/<ver>/<file>.xsd"`.
+    That path is the only place the *version* actually used is visible: a schema
+    database holding a stale version still yields schema_in_scope=true, and every
+    current document then fails against the wrong contract. An empty path (`schema ""`)
+    means no schema was resolved and is dropped. Documents that validate cleanly carry
+    no error and therefore contribute nothing — an all-valid result cannot confirm the
+    version this way.
+    """
+    seen: list[str] = []
+    for f in findings:
+        for path in _USING_SCHEMA_RE.findall(f.get("detail") or ""):
+            if path and path not in seen:
+                seen.append(path)
+    return seen
+
+
+def _no_schema_warning(database: str, schemas_used: list[str]) -> str:
+    """Warning for schema_in_scope=false.
+
+    The probe only knows the first document hit XDMP-VALIDATENODECL. That has two causes
+    the caller must tell apart: no XSD loaded at all (the error names schema ""), or an
+    XSD loaded at an older version that lacks a declaration for an element the document
+    carries (the error names that schema's path). On 2026-11-03 prod `protein` returned
+    the second case, and the previous wording asserted the first.
+    """
+    common = (
+        "In 'lax' mode that yields invalid=0, which must NOT be read as verified; "
+        "in 'strict' mode it yields XDMP-VALIDATENODECL, which reflects the schema "
+        "rather than the data."
+    )
+    if schemas_used:
+        return (
+            "NO DECLARATION IN SCOPE — this result does not tell you whether the "
+            "documents are valid. MarkLogic found no element declaration for the first "
+            "document checked, but the schema database attached to "
+            f"'{database}' DOES hold an XSD: {', '.join(schemas_used)}. That is most "
+            "likely an older schema version lacking elements the documents carry. "
+            + common + " Load the current XSD version into the schema database, or "
+            "validate out-of-band against the authoritative XSD service instead."
+        )
+    return (
+        "NO SCHEMA IN SCOPE — this result does not tell you whether the "
+        "documents are valid. MarkLogic found no element declaration for the "
+        "first document checked, which means the schema database attached to "
+        f"'{database}' has no XSD loaded (check e.g. '{database}-schemas'). "
+        + common + " Load the XSDs into the schema database, or validate "
+        "out-of-band against the authoritative XSD service instead."
+    )
+
+
 def _xq_str(s: str) -> str:
     """Escape a string for use inside an XQuery double-quoted string literal.
 
@@ -503,23 +559,26 @@ return (
             "missing": len(missing),
             "mode": mode,
             "schema_in_scope": schema_in_scope,
+            "schemas_used": _schemas_used(invalid),
             "truncated": truncated,
             "errors": invalid + missing,
         }
+        if schema_in_scope and invalid:
+            # schema_in_scope is inferred from the FIRST document only: a stale schema
+            # version loaded in the schema DB reports true and fails every current
+            # document. Make the caller check the version before reading `invalid`.
+            result["schema_version_check"] = (
+                "Confirm `schemas_used` names the schema version you expect before "
+                "treating `invalid` as data defects. A schema database holding an older "
+                "version reports schema_in_scope=true and rejects every current document "
+                "(e.g. prod `protein` resolved to protein/3 on 2026-11-03 while documents "
+                "are v5). If the version is wrong, the check did not run — validate "
+                "out-of-band against the ent-ref-xsd service."
+            )
         if not schema_in_scope:
             # Without a schema loaded, "lax" validates nothing and reports zero errors —
             # a clean-looking result that verifies nothing at all. Refuse to look clean.
-            result["warning"] = (
-                "NO SCHEMA IN SCOPE — this result does not tell you whether the "
-                f"documents are valid. MarkLogic found no element declaration for the "
-                f"first document checked, which means the schema database attached to "
-                f"'{database}' has no XSD loaded (check e.g. '{database}-schemas'). In "
-                "'lax' mode that yields invalid=0, which must NOT be read as verified; "
-                "in 'strict' mode it yields XDMP-VALIDATENODECL for every document, "
-                "which reflects the missing schema rather than the data. Load the XSDs "
-                "into the schema database, or validate out-of-band against the "
-                "authoritative XSD service instead."
-            )
+            result["warning"] = _no_schema_warning(database, result["schemas_used"])
         return result
 
     def eval_xquery_readonly(self, xquery: str, database: str = "") -> list[str]:

@@ -248,8 +248,10 @@ def validate_documents(
         server: Server name (local/dev/prod). REQUIRED — never defaulted.
 
     Returns {"checked": n, "invalid": n, "missing": n, "mode": str,
-             "schema_in_scope": bool, "truncated": bool,
+             "schema_in_scope": bool, "schemas_used": [path, ...], "truncated": bool,
              "errors": [{"uri", "code", "message", "detail", "error_count"}, ...]}.
+    `schemas_used` lists the XSD paths MarkLogic named in the error details; when
+    there are errors and a schema is in scope, a `schema_version_check` key is added.
 
     **Check `schema_in_scope` before believing a clean result.** If it is false, no XSD
     is loaded in the schema database attached to `database`, a `warning` key explains
@@ -259,6 +261,14 @@ def validate_documents(
     dev environments — validation there is done out-of-band against the authoritative
     XSD service (see the `ent-ref-xsd` MCP server), not by MarkLogic. Confirm
     `schema_in_scope` is true before using this tool as your verification step.
+
+    **`schema_in_scope: true` means *a* schema is loaded, not the right version.** It is
+    inferred from the first document only, so it can flip between calls on the same
+    database. Read `schemas_used` and confirm the version before treating `invalid` as
+    data defects. Prod `protein` resolved to `/xsd/base/protein/3/protein-bmv.xsd` on
+    2026-11-03 while its documents are v5, so every document fails there and in-database
+    validation of protein in prod is not available until v5 is loaded. An all-valid
+    result carries no error text and so cannot confirm the version this way.
     """
     return _client(server).validate_documents(
         database=database, uris=uris, collection=collection, limit=limit, mode=mode
