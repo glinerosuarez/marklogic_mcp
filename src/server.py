@@ -165,6 +165,42 @@ def eval_xquery(xquery: str, database: str, *, server: str) -> list[str]:
     return _client(server).eval_xquery(xquery, database)
 
 
+_OUTPUT_ROOTS = (Path("/tmp").resolve(), Path.home().resolve())
+
+
+def _safe_output_path(file_path: str) -> Path:
+    """Validate eval_xquery_to_file's output path before anything runs.
+
+    The tool is read-only against MarkLogic, which is what makes it safe to
+    pre-authorize in settings.json — but it writes a local file, so an unrestricted
+    path would let a pre-authorized call overwrite any file the user can write
+    (~/.claude/settings.json, ~/.ssh/authorized_keys, ~/.bashrc). Allow only an
+    absolute path that resolves (symlinks followed) under /tmp or $HOME, with no
+    hidden component below that root.
+    """
+    if not file_path or not Path(file_path).is_absolute():
+        raise ValueError(f"file_path must be an absolute path, got: {file_path!r}")
+    resolved = Path(file_path).resolve()
+    for root in _OUTPUT_ROOTS:
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        if not rel.parts:
+            break
+        if any(part.startswith(".") for part in rel.parts):
+            raise ValueError(
+                f"file_path may not be or pass through a hidden file or directory: {file_path!r} "
+                f"(resolves to {resolved})"
+            )
+        return resolved
+    roots = ", ".join(str(r) for r in _OUTPUT_ROOTS)
+    raise ValueError(
+        f"file_path must resolve to a file under one of: {roots}; got {file_path!r} "
+        f"(resolves to {resolved})"
+    )
+
+
 @mcp.tool()
 def eval_xquery_to_file(
     xquery: str,
@@ -191,17 +227,21 @@ def eval_xquery_to_file(
                 'fn:collection("notes")/note/title/fn:string()'
                 'for $d in fn:doc() where $d//status = "active" return base-uri($d)'
         database: Database name, e.g. rnatherapeutic or Documents.
-        file_path: Local filesystem path to write the output to, e.g. /tmp/results.txt.
+        file_path: ABSOLUTE local path to write the output to, e.g. /tmp/results.txt.
+                   Must resolve under /tmp or the user's home directory, and must not
+                   pass through a hidden directory or be a hidden file (so ~/.claude,
+                   ~/.ssh, ~/.bashrc are refused). The check runs before the query.
         server: Server name (local/dev/prod). REQUIRED — never defaulted, so an
                 omission fails loudly instead of silently answering from another environment.
     """
+    out = _safe_output_path(file_path)
     client = _client(server)
     results = client.eval_xquery_readonly(xquery, database)
     # Newline-TERMINATED, not newline-separated: an unterminated final line makes
     # `wc -l` under-report by one and makes `cat a.txt b.txt` merge a's last line
     # into b's first. That silently corrupted 13 of 2,816 accessions on LSCON-6035.
     content = "".join(f"{r}\n" for r in results)
-    Path(file_path).write_text(content, encoding="utf-8")
+    out.write_text(content, encoding="utf-8")
     return f"OK: wrote {len(results)} result item(s) ({len(content)} chars) to {file_path}"
 
 
