@@ -839,6 +839,81 @@ def _():
     assert "readonly" not in inspect.signature(fn).parameters, "readonly param still present"
 
 
+# ------------------------------------------------- eval_xquery_to_file output path
+def _to_file_refused(path: str) -> str:
+    """Call to_file with a valid query; return the error text, or raise if it wrote."""
+    import server as _srv
+    try:
+        _srv.eval_xquery_to_file('("x")', DB, path, server="local")
+    except ValueError as e:
+        return str(e)
+    raise AssertionError(f"to_file accepted output path {path!r}")
+
+
+@check("to_file path: refuses a relative path")
+def _():
+    assert "absolute" in _to_file_refused("results.txt")
+
+
+@check("to_file path: refuses a path outside /tmp and $HOME")
+def _():
+    assert "must resolve" in _to_file_refused("/etc/_sr_to_file_outside.txt")
+
+
+@check("to_file path: refuses a hidden directory under $HOME (~/.claude)")
+def _():
+    target = str(Path.home() / ".claude" / "_sr_to_file_hidden.txt")
+    assert "hidden" in _to_file_refused(target)
+    assert not Path(target).exists(), "a refused path was written"
+
+
+@check("to_file path: refuses a hidden file directly under $HOME (~/.bashrc-like)")
+def _():
+    assert "hidden" in _to_file_refused(str(Path.home() / "._sr_to_file_dotfile"))
+
+
+@check("to_file path: refuses .. traversal out of /tmp")
+def _():
+    assert "must resolve" in _to_file_refused("/tmp/../etc/_sr_to_file_traversal.txt")
+
+
+@check("to_file path: refuses a symlink under /tmp that points into a hidden dir")
+def _():
+    link = Path("/tmp/_sr_to_file_link_dir")
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(Path.home() / ".ssh")
+    try:
+        assert "hidden" in _to_file_refused(str(link / "_sr_to_file_via_link.txt"))
+    finally:
+        link.unlink()
+
+
+@check("to_file path: path refusal happens before the query runs (no MarkLogic call)")
+def _():
+    import server as _srv
+    real = _srv._client
+    _srv._client = lambda s: (_ for _ in ()).throw(AssertionError("query ran before path check"))
+    try:
+        assert "absolute" in _to_file_refused("relative.txt")
+    finally:
+        _srv._client = real
+
+
+@check("to_file path: accepts a normal file under $HOME (non-hidden dir)")
+def _():
+    import server as _srv
+    d = Path.home() / "_sr_to_file_ok_dir"
+    d.mkdir(exist_ok=True)
+    out = d / "ok.txt"
+    try:
+        _srv.eval_xquery_to_file('("ok")', DB, str(out), server="local")
+        assert out.read_text() == "ok\n"
+    finally:
+        out.unlink(missing_ok=True)
+        d.rmdir()
+
+
 # ---------------------------------------------------------------------- teardown
 _hard_delete(PROBE)
 _hard_delete(SEEDED)
